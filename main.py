@@ -1,13 +1,21 @@
 from keras.models import load_model
 import cv2
 import numpy as np
+import time
+import serial
+
+arduino = serial.Serial("/dev/cu.usbserial-10", 9600)
+time.sleep(2)
 
 np.set_printoptions(suppress=True)
 
-model = load_model("model/keras_Model.h5", compile=False)
+model = load_model("model/keras_model.h5", compile=False)
 class_names = open("model/labels.txt", "r").readlines()
 
 camera = cv2.VideoCapture(0)
+
+last_detection_time = 0
+cooldown = 5
 
 while True:
     ret, image = camera.read()
@@ -27,6 +35,36 @@ while True:
 
     print("Class:", class_name[2:], end="")
     print("Confidence Score:", str(np.round(confidence_score * 100))[:-2], "%")
+
+    current_time = time.time()
+
+    if confidence_score > 0.90:
+
+        if current_time - last_detection_time > cooldown:
+
+            if "PLASTICO" in class_name:
+
+                print("Detectado: PLASTICO")
+
+                arduino.write(b'P')
+
+                last_detection_time = current_time
+
+            elif "PAPEL" in class_name:
+
+                print("Detectado: PAPEL")
+
+                arduino.write(b'L')
+
+                last_detection_time = current_time
+
+            elif "METAL" in class_name:
+
+                print("Detectado: METAL")
+
+                arduino.write(b'M')
+
+                last_detection_time = current_time
 
     keyboard_input = cv2.waitKey(1)
 
