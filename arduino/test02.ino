@@ -1,13 +1,32 @@
+bool lastStartButtonState = HIGH;
+bool lastQuitButtonState = HIGH;
+
 void setup() {
   Serial.begin(9600);
   pinMode(4, OUTPUT); // Metal
   pinMode(5, OUTPUT); // Papel
   pinMode(6, OUTPUT); // Plastico
+  pinMode(2, INPUT_PULLUP); // Botón Comenzar
+  pinMode(12, INPUT_PULLUP); // Botón Terminar
 }
 
 void loop() {
+  bool currentStartButtonState = digitalRead(2);
+  bool currentQuitButtonState = digitalRead(12);
+
+  if (lastStartButtonState == HIGH && currentStartButtonState == LOW) {
+    Serial.println("START");
+
+    delay(300);
+  }
+
+  if (lastQuitButtonState == HIGH && currentQuitButtonState == LOW) {
+    Serial.println("QUIT");
+
+    delay(300);
+  }
+
   if (Serial.available() > 0) {
-    
     char data = Serial.read();
     Serial.print(data);
     
