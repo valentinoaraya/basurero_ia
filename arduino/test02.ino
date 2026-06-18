@@ -32,19 +32,22 @@ const bool RGB_ANODO_COMUN = false;
 const int ANGULO_PLASTICO = 0;
 const int ANGULO_PAPEL = 90;
 const int ANGULO_METAL = 180;
-const int ANGULO_CENTRAL = ANGULO_PAPEL;  // Posición de reposo tras depositar
+const int ANGULO_CENTRAL = 90;  // Reposo: basura cae al centro
+
 const int ANGULO_MIN_PLATAFORMA = 0;
 const int ANGULO_MAX_PLATAFORMA = 180;
 
+// Cambiar a true si el joystick mueve la plataforma al revés
+const bool INVERTIR_JOYSTICK = false;
+
 // Ángulos de la compuerta (ajustar según el mecanismo)
-const int GATE_CLOSED = 90;
+const int GATE_CLOSED = 80;
 const int GATE_OPEN = 0;
 
 // Tiempos de movimiento (ms)
 const int PASO_PLATAFORMA = 2;           // grados por paso (menor = más suave)
 const int RETARDO_PASO_PLATAFORMA = 40;  // ms entre pasos (mayor = más lento)
-const int PASO_COMPUERTA = 2;
-const int RETARDO_PASO_COMPUERTA = 30;   // ms entre pasos (mayor = compuerta más lenta)
+const int TIEMPO_MOVIMIENTO_COMPUERTA = 120;  // ms para que el servo de compuerta llegue
 const int TIEMPO_COMPUERTA_ABIERTA = 1500;
 const int INTERVALO_PARPADEO_ANALISIS = 300;
 
@@ -54,6 +57,8 @@ const int JOYSTICK_ZONA_MUERTA = 120;
 const int PASO_MANUAL = 3;
 const int RETARDO_PASO_MANUAL = 35;
 const int DEBOUNCE_BOTON_MS = 50;
+const unsigned long TIMEOUT_PULSEIN_US = 30000;  // Evita bloquear ~1 s sin eco
+const int INTERVALO_ULTRASONIDO = 80;            // ms entre lecturas del HC-SR04
 
 // Distancia mínima para detectar objeto (cm)
 const int distanciaDeteccion = 10;
@@ -64,11 +69,28 @@ int anguloPlataformaActual = ANGULO_CENTRAL;
 int anguloCompuertaActual = GATE_CLOSED;
 int ultimoAnguloMostrado = -1;
 unsigned long ultimoParpadeo = 0;
+unsigned long ultimaMedicionUltrasonido = 0;
 bool ledAnalisisEncendido = true;
 
 void moverPlataformaLento(int anguloDestino);
-void moverCompuertaLento(int anguloDestino);
+void moverCompuertaRapida(int anguloDestino);
 void volverAReady();
+
+int limitarAnguloPlataforma(int angulo) {
+  if (angulo < ANGULO_MIN_PLATAFORMA) {
+    return ANGULO_MIN_PLATAFORMA;
+  }
+  if (angulo > ANGULO_MAX_PLATAFORMA) {
+    return ANGULO_MAX_PLATAFORMA;
+  }
+  return angulo;
+}
+
+void escribirPlataforma(int angulo) {
+  angulo = limitarAnguloPlataforma(angulo);
+  platformServo.write(angulo);
+  anguloPlataformaActual = angulo;
+}
 
 void setRgb(bool rojo, bool verde, bool azul) {
   if (RGB_ANODO_COMUN) {
@@ -151,7 +173,7 @@ void beepModoAutomatico() {
   emitirTono(700, 150);
 }
 
-bool botonPresionado(int pin, int &estadoEstable, int &estadoAnterior, unsigned long &ultimoDebounce) {
+bool botonPresionado(int pin, int &estadoEstable, int &estadoAnterior, unsigned long &ultimoDebounce, bool &presionadoActivo) {
   int lectura = digitalRead(pin);
   bool presionado = false;
 
@@ -160,10 +182,18 @@ bool botonPresionado(int pin, int &estadoEstable, int &estadoAnterior, unsigned 
     estadoAnterior = lectura;
   }
 
-  if ((millis() - ultimoDebounce) > DEBOUNCE_BOTON_MS && lectura != estadoEstable) {
-    estadoEstable = lectura;
-    if (estadoEstable == LOW) {
+  if ((millis() - ultimoDebounce) > DEBOUNCE_BOTON_MS) {
+    if (lectura != estadoEstable) {
+      estadoEstable = lectura;
+    }
+
+    if (estadoEstable == LOW && !presionadoActivo) {
       presionado = true;
+      presionadoActivo = true;
+    }
+
+    if (estadoEstable == HIGH) {
+      presionadoActivo = false;
     }
   }
 
@@ -173,19 +203,31 @@ bool botonPresionado(int pin, int &estadoEstable, int &estadoAnterior, unsigned 
 void mostrarPantallaManual() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Modo MANUAL");
+  lcd.print("MANUAL ");
+  lcd.print(ANGULO_MIN_PLATAFORMA);
+  lcd.print("-");
+  lcd.print(ANGULO_MAX_PLATAFORMA);
   lcd.setCursor(0, 1);
-  lcd.print("Ang: ");
+  lcd.print("Ang:");
   lcd.print(anguloPlataformaActual);
-  lcd.print("     ");
+  lcd.print("        ");
   ultimoAnguloMostrado = anguloPlataformaActual;
 }
 
 void actualizarAnguloEnPantalla() {
   if (anguloPlataformaActual != ultimoAnguloMostrado) {
-    lcd.setCursor(5, 1);
+    lcd.setCursor(0, 1);
+    lcd.print("Ang:");
     lcd.print(anguloPlataformaActual);
-    lcd.print("   ");
+
+    if (anguloPlataformaActual <= ANGULO_MIN_PLATAFORMA) {
+      lcd.print(" MIN   ");
+    } else if (anguloPlataformaActual >= ANGULO_MAX_PLATAFORMA) {
+      lcd.print(" MAX   ");
+    } else {
+      lcd.print("       ");
+    }
+
     ultimoAnguloMostrado = anguloPlataformaActual;
   }
 }
@@ -209,11 +251,12 @@ void procesarBotonModo() {
   static int estadoEstable = HIGH;
   static int estadoAnterior = HIGH;
   static unsigned long ultimoDebounce = 0;
+  static bool presionadoActivo = false;
 
-  if (botonPresionado(PIN_BOTON_MODO, estadoEstable, estadoAnterior, ultimoDebounce)) {
+  if (botonPresionado(PIN_BOTON_MODO, estadoEstable, estadoAnterior, ultimoDebounce, presionadoActivo)) {
     if (modoManual) {
       salirModoManual();
-    } else if (!esperandoRespuesta) {
+    } else {
       entrarModoManual();
     }
   }
@@ -221,25 +264,25 @@ void procesarBotonModo() {
 
 void controlarPlataformaJoystick() {
   int lecturaX = analogRead(PIN_JOYSTICK_X);
+  bool moverIzquierda = lecturaX < (JOYSTICK_CENTRO - JOYSTICK_ZONA_MUERTA);
+  bool moverDerecha = lecturaX > (JOYSTICK_CENTRO + JOYSTICK_ZONA_MUERTA);
 
-  if (lecturaX < (JOYSTICK_CENTRO - JOYSTICK_ZONA_MUERTA)) {
-    int nuevoAngulo = anguloPlataformaActual - PASO_MANUAL;
-    if (nuevoAngulo < ANGULO_MIN_PLATAFORMA) {
-      nuevoAngulo = ANGULO_MIN_PLATAFORMA;
-    }
+  if (INVERTIR_JOYSTICK) {
+    bool temp = moverIzquierda;
+    moverIzquierda = moverDerecha;
+    moverDerecha = temp;
+  }
+
+  if (moverIzquierda) {
+    int nuevoAngulo = limitarAnguloPlataforma(anguloPlataformaActual - PASO_MANUAL);
     if (nuevoAngulo != anguloPlataformaActual) {
-      platformServo.write(nuevoAngulo);
-      anguloPlataformaActual = nuevoAngulo;
+      escribirPlataforma(nuevoAngulo);
       delay(RETARDO_PASO_MANUAL);
     }
-  } else if (lecturaX > (JOYSTICK_CENTRO + JOYSTICK_ZONA_MUERTA)) {
-    int nuevoAngulo = anguloPlataformaActual + PASO_MANUAL;
-    if (nuevoAngulo > ANGULO_MAX_PLATAFORMA) {
-      nuevoAngulo = ANGULO_MAX_PLATAFORMA;
-    }
+  } else if (moverDerecha) {
+    int nuevoAngulo = limitarAnguloPlataforma(anguloPlataformaActual + PASO_MANUAL);
     if (nuevoAngulo != anguloPlataformaActual) {
-      platformServo.write(nuevoAngulo);
-      anguloPlataformaActual = nuevoAngulo;
+      escribirPlataforma(nuevoAngulo);
       delay(RETARDO_PASO_MANUAL);
     }
   }
@@ -251,14 +294,14 @@ void abrirCompuertaManual() {
   lcd.setCursor(0, 1);
   lcd.print("Compuerta ON   ");
 
-  moverCompuertaLento(GATE_OPEN);
+  moverCompuertaRapida(GATE_OPEN);
   delay(TIEMPO_COMPUERTA_ABIERTA);
-  moverCompuertaLento(GATE_CLOSED);
+  moverCompuertaRapida(GATE_CLOSED);
 
   lcd.setCursor(0, 1);
-  lcd.print("Ang: ");
+  lcd.print("Ang:");
   lcd.print(anguloPlataformaActual);
-  lcd.print("     ");
+  lcd.print("       ");
   ultimoAnguloMostrado = anguloPlataformaActual;
 }
 
@@ -268,8 +311,9 @@ void actualizarModoManual() {
   static int estadoEstable = HIGH;
   static int estadoAnterior = HIGH;
   static unsigned long ultimoDebounce = 0;
+  static bool presionadoActivo = false;
 
-  if (botonPresionado(PIN_JOYSTICK_SW, estadoEstable, estadoAnterior, ultimoDebounce)) {
+  if (botonPresionado(PIN_JOYSTICK_SW, estadoEstable, estadoAnterior, ultimoDebounce, presionadoActivo)) {
     abrirCompuertaManual();
   }
 }
@@ -309,8 +353,7 @@ void setup() {
   platformServo.attach(platformServoPin);
   gateServo.attach(gateServoPin);
 
-  platformServo.write(ANGULO_CENTRAL);
-  anguloPlataformaActual = ANGULO_CENTRAL;
+  escribirPlataforma(ANGULO_CENTRAL);
   gateServo.write(GATE_CLOSED);
   anguloCompuertaActual = GATE_CLOSED;
 
@@ -328,32 +371,37 @@ void loop() {
 
   if (modoManual) {
     actualizarModoManual();
+    procesarBotonModo();
     return;
   }
 
   actualizarLedAnalizando();
 
   if (!esperandoRespuesta) {
-    long distancia = medirDistancia();
+    unsigned long ahora = millis();
+    if (ahora - ultimaMedicionUltrasonido >= INTERVALO_ULTRASONIDO) {
+      ultimaMedicionUltrasonido = ahora;
+      long distancia = medirDistancia();
 
-    if (distancia > 0 && distancia <= distanciaDeteccion) {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Objeto detect.");
+      if (distancia > 0 && distancia <= distanciaDeteccion) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Objeto detect.");
 
-      lcd.setCursor(0, 1);
-      lcd.print("Analizando...");
+        lcd.setCursor(0, 1);
+        lcd.print("Analizando...");
 
-      setColorAdvertencia();
-      beepDeteccion();
+        setColorAdvertencia();
+        beepDeteccion();
 
-      Serial.println("START");
-      esperandoRespuesta = true;
-      ultimoParpadeo = millis();
-      ledAnalisisEncendido = true;
-      setColorAnalizando();
+        Serial.println("START");
+        esperandoRespuesta = true;
+        ultimoParpadeo = millis();
+        ledAnalisisEncendido = true;
+        setColorAnalizando();
 
-      delay(1000);
+        delay(1000);
+      }
     }
   }
 
@@ -361,6 +409,8 @@ void loop() {
     char tipo = Serial.read();
     procesarRespuesta(tipo);
   }
+
+  procesarBotonModo();
 }
 
 void procesarRespuesta(char tipo) {
@@ -404,12 +454,16 @@ void procesarRespuesta(char tipo) {
 
 void mostrarTipo(const char *tipo) {
   lcd.setCursor(0, 0);
-  lcd.print("Tipo:");
-  lcd.setCursor(0, 1);
+  lcd.print("Tipo: ");
   lcd.print(tipo);
+  lcd.print("        ");  // Limpia restos de textos anteriores
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
 }
 
 void moverPlataformaLento(int anguloDestino) {
+  anguloDestino = limitarAnguloPlataforma(anguloDestino);
+
   if (anguloDestino == anguloPlataformaActual) {
     return;
   }
@@ -426,29 +480,17 @@ void moverPlataformaLento(int anguloDestino) {
     }
   }
 
-  platformServo.write(anguloDestino);
-  anguloPlataformaActual = anguloDestino;
+  escribirPlataforma(anguloDestino);
 }
 
-void moverCompuertaLento(int anguloDestino) {
+void moverCompuertaRapida(int anguloDestino) {
   if (anguloDestino == anguloCompuertaActual) {
     return;
   }
 
-  if (anguloDestino > anguloCompuertaActual) {
-    for (int angulo = anguloCompuertaActual; angulo <= anguloDestino; angulo += PASO_COMPUERTA) {
-      gateServo.write(angulo);
-      delay(RETARDO_PASO_COMPUERTA);
-    }
-  } else {
-    for (int angulo = anguloCompuertaActual; angulo >= anguloDestino; angulo -= PASO_COMPUERTA) {
-      gateServo.write(angulo);
-      delay(RETARDO_PASO_COMPUERTA);
-    }
-  }
-
   gateServo.write(anguloDestino);
   anguloCompuertaActual = anguloDestino;
+  delay(TIEMPO_MOVIMIENTO_COMPUERTA);
 }
 
 void depositarBasura(int anguloPlataforma) {
@@ -459,10 +501,10 @@ void depositarBasura(int anguloPlataforma) {
   lcd.setCursor(0, 1);
   lcd.print("Depositando...");
 
-  moverCompuertaLento(GATE_OPEN);
+  moverCompuertaRapida(GATE_OPEN);
   delay(TIEMPO_COMPUERTA_ABIERTA);
 
-  moverCompuertaLento(GATE_CLOSED);
+  moverCompuertaRapida(GATE_CLOSED);
 
   lcd.setCursor(0, 1);
   lcd.print("Volviendo...   ");
@@ -490,7 +532,11 @@ long medirDistancia() {
 
   digitalWrite(trigPin, LOW);
 
-  long duracion = pulseIn(echoPin, HIGH);
+  long duracion = pulseIn(echoPin, HIGH, TIMEOUT_PULSEIN_US);
+  if (duracion == 0) {
+    return -1;
+  }
+
   long distancia = duracion * 0.0343 / 2;
 
   return distancia;
